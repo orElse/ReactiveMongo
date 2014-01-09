@@ -128,7 +128,9 @@ object Dependencies {
   val specs = "org.specs2" %% "specs2" % "2.2.3" % "test"
 
   val log4jVersion = "2.0-beta9"
-  val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+  // val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+  val log4j = Seq("org.apache.logging.log4j" % "log4j-slf4j-impl" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+
 }
 
 object ReactiveMongoBuild extends Build {

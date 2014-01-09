@@ -119,13 +119,13 @@ object Resolvers {
 }
 
 object Dependencies {
-  val netty = "io.netty" % "netty" % "3.6.5.Final" cross CrossVersion.Disabled
+  val netty = "io.netty" % "netty" % "3.8.0.Final" cross CrossVersion.Disabled
 
-  val akkaActor = "com.typesafe.akka" %% "akka-actor" % "2.2.1"
+  val akkaActor = "com.typesafe.akka" %% "akka-actor" % "2.3-M2"
 
   val iteratees = "com.typesafe.play" %% "play-iteratees" % "2.2.0"
 
-  val specs = "org.specs2" %% "specs2" % "2.2.1" % "test"
+  val specs = "org.specs2" %% "specs2" % "2.2.3" % "test"
 
   val log4jVersion = "2.0-beta9"
   val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
@@ -141,14 +141,14 @@ object ReactiveMongoBuild extends Build {
     Project(
       "ReactiveMongo-Root",
       file("."),
-      settings = buildSettings ++ (publishArtifact := false) ).
+      settings = buildSettings ++ net.virtualvoid.sbt.graph.Plugin.graphSettings ++ (publishArtifact := false) ).
     settings(UnidocPlugin.unidocSettings: _*).
     aggregate(driver, bson, bsonmacros)
 
   lazy val driver = Project(
     "ReactiveMongo",
     file("driver"),
-    settings = buildSettings ++ Seq(
+    settings = buildSettings ++ net.virtualvoid.sbt.graph.Plugin.graphSettings ++ Seq(
       resolvers := resolversList,
       libraryDependencies <++= (scalaVersion)(sv => Seq(
         netty,
@@ -159,13 +159,13 @@ object ReactiveMongoBuild extends Build {
   lazy val bson = Project(
     "ReactiveMongo-BSON",
     file("bson"),
-    settings = buildSettings).
+    settings = buildSettings ++ net.virtualvoid.sbt.graph.Plugin.graphSettings).
     settings(libraryDependencies += Dependencies.specs)
 
   lazy val bsonmacros = Project(
     "ReactiveMongo-BSON-Macros",
     file("macros"),
-    settings = buildSettings ++ Seq(
+    settings = buildSettings ++ net.virtualvoid.sbt.graph.Plugin.graphSettings ++ Seq(
       libraryDependencies <+= (scalaVersion)("org.scala-lang" % "scala-compiler" % _)
     )).
     settings(libraryDependencies += Dependencies.specs).

@@ -2,7 +2,7 @@ import sbt._
 import sbt.Keys._
 
 object BuildSettings {
-  val akkaVersion = "2.3.0-RC1"
+  val akkaVersion = "2.3.0"
   val buildVersion = "0.11.0_AKKA-"+akkaVersion+"-SNAPSHOT"
   
 

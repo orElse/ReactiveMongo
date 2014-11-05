@@ -2,7 +2,8 @@ import sbt._
 import sbt.Keys._
 
 object BuildSettings {
-  val buildVersion = "0.11.0-SNAPSHOT"
+  
+  val buildVersion = "0.11.0_slf4j-SNAPSHOT"
 
   val filter = { (ms: Seq[(File, String)]) =>
     ms filter {
@@ -119,16 +120,20 @@ object Resolvers {
 }
 
 object Dependencies {
-  val netty = "io.netty" % "netty" % "3.6.5.Final" cross CrossVersion.Disabled
+  val AkkaVersion = "2.3.6"
+  
+  val netty = "io.netty" % "netty" % "3.8.0.Final" cross CrossVersion.Disabled
 
-  val akkaActor = "com.typesafe.akka" %% "akka-actor" % "2.3.6"
+  val akkaActor = "com.typesafe.akka" %% "akka-actor" % AkkaVersion
 
   val iteratees = "com.typesafe.play" %% "play-iteratees" % "2.3.5"
 
   val specs = "org.specs2" %% "specs2-core" % "2.3.11" % "test"
 
   val log4jVersion = "2.0.2"
-  val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+  // val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+  val log4j = Seq("org.apache.logging.log4j" % "log4j-api" % log4jVersion, "org.apache.logging.log4j" % "log4j-slf4j-impl" % log4jVersion, "org.apache.logging.log4j" % "log4j-core" % log4jVersion)
+
 }
 
 object ReactiveMongoBuild extends Build {

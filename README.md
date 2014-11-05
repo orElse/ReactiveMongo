@@ -26,7 +26,7 @@ But if what you're interested in is live feeds then you can stream a MongoDB cap
 
 Moreover, you can now use GridFS as a non-blocking, streaming datastore. ReactiveMongo retrieves the file, chunk by chunk, and streams it until the client is done or there's no more data. Neither huge memory consumption, nor blocked thread during the process!
 
-## Step By Step Example 
+## Step By Step Example
 
 Let's show a simple use case: print the documents of a collection.
 
@@ -45,22 +45,21 @@ This will start a standalone MongoDB instance that stores its data in the ```dat
 
 ReactiveMongo is available on [Maven Central](http://search.maven.org/#browse%7C1306790).
 
-If you use SBT, you just have to edit `build.sbt` and add the following:
+If you use sbt, you just have to edit `build.sbt` and add the following:
 
 ```scala
-libraryDependencies ++= Seq(
-  "org.reactivemongo" %% "reactivemongo" % "0.10.0"
-)
+// using akka 2.3.x and scala 2.10.x or 2.11.x
+libraryDependencies += "org.reactivemongo" %% "reactivemongo" % "0.10.5.0.akka23"
 ```
+
+Note: there is a version compiled against akka 2.2.x and scala 2.10.x only (`0.10.5.0.akka22`).
 
 Or if you want to be on the bleeding edge using snapshots:
 
 ```scala
-resolvers += "Sonatype Snapshots" at "http://oss.sonatype.org/content/repositories/snapshots/"
+resolvers += "Sonatype Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots/"
 
-libraryDependencies ++= Seq(
-  "org.reactivemongo" %% "reactivemongo" % "0.11.0-SNAPSHOT"
-)
+libraryDependencies += "org.reactivemongo" %% "reactivemongo" % "0.11.0-SNAPSHOT"
 ```
 
 You may also need to add the [Typesafe Repository](http://repo.typesafe.com/typesafe/releases/) as a resolver:

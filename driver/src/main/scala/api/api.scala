@@ -83,10 +83,62 @@ class Failover[T](message: T, connection: MongoConnection, strategy: FailoverStr
     case PrimaryUnavailableException | NodeSetNotReachable => true
     case e: DatabaseException if e.isNotAPrimaryError || e.isUnauthorized => true
     case _: ConnectionException => true
+    case _: ConnectionNotInitialized => true
     case _ => false
   }
 
   send(0)
+}
+
+class Failover2[A](producer: () => Future[A], connection: MongoConnection, strategy: FailoverStrategy)(implicit ec: ExecutionContext) {
+  import Failover2.logger
+  import reactivemongo.core.errors._
+  import reactivemongo.core.actors.Exceptions._
+
+  private val promise = Promise[A]()
+
+  /** A future that is completed with a response, after 1 or more attempts (specified in the given strategy). */
+  val future: Future[A] = promise.future
+
+  private def send(n: Int): Unit = {
+    Future(producer()).flatMap(identity).onComplete {
+      case Failure(e) if isRetryable(e) =>
+        if (n < strategy.retries) {
+          val `try` = n + 1
+          val delayFactor = strategy.delayFactor(`try`)
+          val delay = Duration.unapply(strategy.initialDelay * delayFactor).map(t => FiniteDuration(t._1, t._2)).getOrElse(strategy.initialDelay)
+          logger.debug("Got an error, retrying... (try #" + `try` + " is scheduled in " + delay.toMillis + " ms)", e)
+          connection.actorSystem.scheduler.scheduleOnce(delay)(send(`try`))
+        } else {
+          // generally that means that the primary is not available or the nodeset is unreachable
+          logger.error("Got an error, no more attempts to do. Completing with a failure...", e)
+          promise.failure(e)
+        }
+      case Failure(e) =>
+        logger.trace("Got an non retryable error, completing with a failure...", e)
+        promise.failure(e)
+      case Success(response) =>
+        logger.trace("Got a successful result, completing...")
+        promise.success(response)
+    }
+  }
+
+  private def isRetryable(throwable: Throwable) = throwable match {
+    case PrimaryUnavailableException | NodeSetNotReachable => true
+    case e: DatabaseException if e.isNotAPrimaryError || e.isUnauthorized => true
+    case _: ConnectionException => true
+    case _: ConnectionNotInitialized => true
+    case _ => false
+  }
+
+  send(0)
+}
+
+object Failover2 {
+  private val logger = LazyLogger("reactivemongo.api.Failover2")
+
+  def apply[A](connection: MongoConnection, strategy: FailoverStrategy)(producer: () => Future[A])(implicit ec: ExecutionContext): Failover2[A] =
+    new Failover2(producer, connection, strategy)
 }
 
 object Failover {
@@ -109,7 +161,7 @@ object Failover {
    * @param strategy The Failover strategy.
    */
   def apply(requestMaker: RequestMaker, connection: MongoConnection, strategy: FailoverStrategy)(implicit ec: ExecutionContext): Failover[RequestMaker] =
-    new Failover(requestMaker, connection, strategy)(RequestMakerExpectingResponse.apply)
+    new Failover(requestMaker, connection, strategy)(RequestMakerExpectingResponse(_, false))
 }
 
 /**
@@ -149,7 +201,7 @@ case class FailoverStrategy(
 class MongoConnection(
     val actorSystem: ActorSystem,
     val mongosystem: ActorRef,
-    val monitor: ActorRef) {
+    val options: MongoConnectionOptions) {
   import akka.pattern.{ ask => akkaAsk }
   import akka.util.Timeout
   /**
@@ -181,8 +233,8 @@ class MongoConnection(
    *
    * @return The future response.
    */
-  def ask(message: RequestMaker): Future[Response] = {
-    val msg = RequestMakerExpectingResponse(message)
+  def ask(message: RequestMaker, isMongo26WriteOp: Boolean): Future[Response] = {
+    val msg = RequestMakerExpectingResponse(message, isMongo26WriteOp)
     mongosystem ! msg
     msg.future
   }
@@ -205,7 +257,19 @@ class MongoConnection(
    *
    * @param message The request maker.
    */
-  def send(message: RequestMaker) = mongosystem ! message
+  def send(message: RequestMaker): Unit = mongosystem ! message
+
+  def sendExpectingResponse(checkedWriteRequest: CheckedWriteRequest)(implicit ec: ExecutionContext): Future[Response] = {
+    val expectingResponse = CheckedWriteRequestExpectingResponse(checkedWriteRequest)
+    mongosystem ! expectingResponse
+    expectingResponse.future
+  }
+
+  def sendExpectingResponse(requestMaker: RequestMaker, isMongo26WriteOp: Boolean)(implicit ec: ExecutionContext): Future[Response] = {
+    val expectingResponse = RequestMakerExpectingResponse(requestMaker, isMongo26WriteOp)
+    mongosystem ! expectingResponse
+    expectingResponse.future
+  }
 
   /** Authenticates the connection on the given database. */
   def authenticate(db: String, user: String, password: String): Future[SuccessfulAuthentication] = {
@@ -220,6 +284,72 @@ class MongoConnection(
 
   /** Closes this MongoConnection (closes all the channels and ends the actors) */
   def close(): Unit = monitor ! Close
+
+
+  import akka.actor._
+  import reactivemongo.core.nodeset.ProtocolMetadata
+
+  val monitor = actorSystem.actorOf(Props(new MonitorActor))
+
+  @volatile private[reactivemongo] var metadata: Option[ProtocolMetadata] = None
+
+  private class MonitorActor extends Actor {
+    import MonitorActor._
+    import scala.collection.mutable.Queue
+
+    mongosystem ! RegisterMonitor
+
+    private val waitingForPrimary = Queue[ActorRef]()
+
+    var primaryAvailable = false
+
+    private val waitingForClose = Queue[ActorRef]()
+    var killed = false
+
+    override def receive = {
+      case pa: PrimaryAvailable =>
+        logger.debug("set: a primary is available")
+        primaryAvailable = true
+        metadata = Some(pa.metadata)
+        waitingForPrimary.dequeueAll(_ => true).foreach(_ ! pa)
+      case PrimaryUnavailable =>
+        logger.debug("set: no primary available")
+        primaryAvailable = false
+      case sa: SetAvailable =>
+        logger.debug("set: a node is available")
+        metadata = Some(sa.metadata)
+      case SetUnavailable =>
+        logger.debug("set: no node seems to be available")
+      case WaitForPrimary =>
+        if (killed)
+          sender ! Failure(new RuntimeException("MongoDBSystem actor shutting down or no longer active"))
+        else if (primaryAvailable && metadata.isDefined) {
+          logger.debug(sender + " is waiting for a primary... available right now, go!")
+          sender ! PrimaryAvailable(metadata.get)
+        } else {
+          logger.debug(sender + " is waiting for a primary...  not available, warning as soon a primary is available.")
+          waitingForPrimary += sender
+        }
+      case Close =>
+        logger.debug("Monitor received Close")
+        killed = true
+        mongosystem ! Close
+        waitingForClose += sender
+        waitingForPrimary.dequeueAll(_ => true).foreach(_ ! Failure(new RuntimeException("MongoDBSystem actor shutting down or no longer active")))
+      case Closed =>
+        logger.debug(s"Monitor $self closed, stopping...")
+        waitingForClose.dequeueAll(_ => true).foreach(_ ! Closed)
+        context.stop(self)
+    }
+
+    override def postStop {
+      logger.debug(s"Monitor $self stopped.")
+    }
+  }
+
+  object MonitorActor {
+    private val logger = LazyLogger("reactivemongo.core.actors.MonitorActor")
+  }
 }
 
 object MongoConnection {
@@ -232,6 +362,8 @@ object MongoConnection {
 
   final case class ParsedURI(
     hosts: List[(String, Int)],
+    options: MongoConnectionOptions,
+    ignoredOptions: List[String],
     db: Option[String],
     authenticate: Option[Authenticate])
 
@@ -274,26 +406,76 @@ object MongoConnection {
         case _                      => throw new URIParsingException(s"Could not parse URI '$uri'")
       }
     }
+    def parseOptions(uriAndOptions: String): Map[String, String] = {
+      uriAndOptions.split('?').toList match {
+        case uri :: options :: Nil => options.split("&").map{ option =>
+          option.split("=").toList match {
+            case key :: value :: Nil => (key -> value)
+            case _ => throw new URIParsingException(s"Could not parse URI '$uri': invalid options '$options'")
+          }
+        }.toMap
+        case _ => Map.empty
+      }
+    }
+    def makeOptions(opts: Map[String, String]): (List[String], MongoConnectionOptions) = {
+      opts.iterator.foldLeft(List.empty[String] -> MongoConnectionOptions()) { case ((unsupportedKeys, result), kv) =>
+        kv match {
+          case ("authSource", v)           => unsupportedKeys -> result.copy(authSource = Some(v))
+          case ("connectTimeoutMS", v)     => unsupportedKeys -> result.copy(connectTimeoutMS = v.toInt)
+
+          case ("rm.tcpNoDelay", v)        => unsupportedKeys -> result.copy(tcpNoDelay = v.toBoolean)
+          case ("rm.keepAlive", v)         => unsupportedKeys -> result.copy(keepAlive = v.toBoolean)
+          case ("rm.nbChannelsPerNode", v) => unsupportedKeys -> result.copy(nbChannelsPerNode = v.toInt    )
+
+          case (k, _) => (k :: unsupportedKeys) -> result
+        }
+      }
+    }
 
     Try {
       val useful = uri.replace(prefix, "")
+      def opts = makeOptions(parseOptions(useful))
       useful.split("@").toList match {
         case hostsPortsAndDbName :: Nil =>
           val (db, hosts) = parseHostsAndDbName(hostsPortsAndDbName)
-          ParsedURI(hosts, db, None)
+          val (unsupportedKeys, options) = opts
+          ParsedURI(hosts, options, unsupportedKeys, db, None)
         case usernamePasswd :: hostsPortsAndDbName :: Nil =>
           val (db, hosts) = parseHostsAndDbName(hostsPortsAndDbName)
           if (!db.isDefined)
             throw new URIParsingException(s"Could not parse URI '$uri': authentication information found but no database name in URI")
+          val (unsupportedKeys, options) = opts
           val authenticate = parseAuth(usernamePasswd)
-          ParsedURI(hosts, db, Some(Authenticate.apply(db.get, authenticate._1, authenticate._2)))
+          ParsedURI(hosts, options, unsupportedKeys, db, Some(Authenticate.apply(options.authSource.getOrElse(db.get), authenticate._1, authenticate._2)))
         case _ => throw new URIParsingException(s"Could not parse URI '$uri'")
       }
     }
   }
 }
 
+/**
+ * Options for MongoConnection.
+ *
+ * @param connectTimeoutMS The number of milliseconds to wait for a connection to be established before giving up.
+ * @param authSource The database source for authentication credentials.
+ * @param tcpNoDelay TCPNoDelay flag (ReactiveMongo-specific option).
+ * @param keepAlive TCP KeepAlive flag (ReactiveMongo-specific option).
+ * @param nbChannelsPerNode Number of channels (connections) per node (ReactiveMongo-specific option).
+ */
+case class MongoConnectionOptions(
+  // canonical options - connection
+  connectTimeoutMS: Int = 0,
+  // canonical options - authentication options
+  authSource: Option[String] = None,
+
+  // reactivemongo specific options
+  tcpNoDelay: Boolean = true,
+  keepAlive: Boolean = true,
+  nbChannelsPerNode: Int = 10
+)
+
 class MongoDriver(systemOption: Option[ActorSystem] = None) {
+  import MongoDriver.logger
 
   def this(system: ActorSystem) = this(Some(system))
 
@@ -305,7 +487,7 @@ class MongoDriver(systemOption: Option[ActorSystem] = None) {
   val system = systemOption.getOrElse(MongoDriver.defaultSystem)
 
   def close() = systemOption match {
-    // Non default actor system -- terminate actors used by MongoConnections 
+    // Non default actor system -- terminate actors used by MongoConnections
     case Some(_) =>
       connections.foreach { connection =>
         connection.monitor ! Close
@@ -323,12 +505,12 @@ class MongoDriver(systemOption: Option[ActorSystem] = None) {
    * @param authentications A list of Authenticates.
    * @param nbChannelsPerNode Number of channels to open per node. Defaults to 10.
    * @param name The name of the newly created [[reactivemongo.core.actors.MongoDBSystem]] actor, if needed.
+   * @param options Options for the new connection pool.
    */
-  def connection(nodes: Seq[String], authentications: Seq[Authenticate] = Seq.empty, nbChannelsPerNode: Int = 10, name: Option[String] = None): MongoConnection = {
-    val props = Props(new MongoDBSystem(nodes, authentications, nbChannelsPerNode))
+  def connection(nodes: Seq[String], options: MongoConnectionOptions = MongoConnectionOptions(), authentications: Seq[Authenticate] = Seq.empty, nbChannelsPerNode: Int = 10, name: Option[String] = None): MongoConnection = {
+    val props = Props(new MongoDBSystem(nodes, authentications, options)())
     val mongosystem = if (name.isDefined) system.actorOf(props, name = name.get) else system.actorOf(props)
-    val monitor = system.actorOf(Props(new MonitorActor(mongosystem)))
-    val connection = new MongoConnection(system, mongosystem, monitor)
+    val connection = new MongoConnection(system, mongosystem, options)
     this.synchronized {
       _connections = connection :: _connections
     }
@@ -344,8 +526,11 @@ class MongoDriver(systemOption: Option[ActorSystem] = None) {
    * @param nbChannelsPerNode Number of channels to open per node.
    * @param name The name of the newly created [[reactivemongo.core.actors.MongoDBSystem]] actor, if needed.
    */
-  def connection(parsedURI: MongoConnection.ParsedURI, nbChannelsPerNode: Int, name: Option[String]): MongoConnection =
-    connection(parsedURI.hosts.map(h => h._1 + ':' + h._2), parsedURI.authenticate.toSeq, nbChannelsPerNode, name)
+  def connection(parsedURI: MongoConnection.ParsedURI, nbChannelsPerNode: Int, name: Option[String]): MongoConnection = {
+    if(!parsedURI.ignoredOptions.isEmpty)
+      logger.warn(s"Some options were ignored because they are not supported (yet): ${parsedURI.ignoredOptions.mkString(", ")}")
+    connection(parsedURI.hosts.map(h => h._1 + ':' + h._2), parsedURI.options, parsedURI.authenticate.toSeq, nbChannelsPerNode, name)
+  }
 
   /**
    * Creates a new MongoConnection from URI.
@@ -370,6 +555,7 @@ class MongoDriver(systemOption: Option[ActorSystem] = None) {
 }
 
 object MongoDriver {
+  private val logger = LazyLogger("reactivemongo.api.MongoDriver")
 
   /** Default ActorSystem used in the default MongoDriver constructor. */
   private def defaultSystem = {

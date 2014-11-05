@@ -10,7 +10,7 @@ import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory
 import org.jboss.netty.buffer.HeapChannelBufferFactory
 import org.jboss.netty.channel.{ Channel, ChannelPipeline, Channels }
 import reactivemongo.core.protocol._
-import reactivemongo.api.ReadPreference
+import reactivemongo.api.{ MongoConnectionOptions, ReadPreference }
 import reactivemongo.bson._
 
 package object utils {
@@ -51,6 +51,7 @@ case class NodeSet(
   val queryable = secondaries.subject ++ primary
   val nearestGroup = new RoundRobiner(queryable.sortWith { _.pingInfo.ping < _.pingInfo.ping })
   val nearest = nearestGroup.subject.headOption
+  val protocolMetadata = primary.orElse(secondaries.subject.headOption).map(_.protocolMetadata).getOrElse(ProtocolMetadata.Default)
 
   def primary(authenticated: Authenticated): Option[Node] =
     primary.filter(_.authenticated.exists(_ == authenticated))
@@ -135,6 +136,7 @@ case class Node(
     connections: Vector[Connection],
     authenticated: Set[Authenticated],
     tags: Option[BSONDocument],
+    protocolMetadata: ProtocolMetadata,
     pingInfo: PingInfo = PingInfo()) {
 
   val (host: String, port: Int) = {
@@ -159,6 +161,17 @@ case class Node(
   }
 
   def toShortString = s"Node[$name: $status (${connected.size}/${connections.size} available connections), latency=${pingInfo.ping}], auth=${authenticated}"
+}
+
+case class ProtocolMetadata(
+  minWireVersion: MongoWireVersion,
+  maxWireVersion: MongoWireVersion,
+  maxMessageSizeBytes: Int,
+  maxBsonSize: Int,
+  maxBulkSize: Int
+)
+object ProtocolMetadata {
+  val Default = ProtocolMetadata(MongoWireVersion.V24AndBefore, MongoWireVersion.V24AndBefore, 48000000, 16 * 1024 * 1024, 1000)
 }
 
 case class Connection(
@@ -299,7 +312,7 @@ class RoundRobiner[A, M[T] <: Iterable[T]](val subject: M[A], startAtIndex: Int 
   def copy(subject: M[A], startAtIndex: Int = iterator.nextIndex) = new RoundRobiner(subject, startAtIndex)
 }
 
-class ChannelFactory(bossExecutor: Executor = Executors.newCachedThreadPool, workerExecutor: Executor = Executors.newCachedThreadPool) {
+class ChannelFactory(options: MongoConnectionOptions, bossExecutor: Executor = Executors.newCachedThreadPool, workerExecutor: Executor = Executors.newCachedThreadPool) {
   private val logger = LazyLogger("reactivemongo.core.nodeset.ChannelFactory")
 
   def create(host: String = "localhost", port: Int = 27017, receiver: ActorRef) = {
@@ -312,18 +325,15 @@ class ChannelFactory(bossExecutor: Executor = Executors.newCachedThreadPool, wor
 
   private val bufferFactory = new HeapChannelBufferFactory(java.nio.ByteOrder.LITTLE_ENDIAN)
 
-  private def makeOptions: java.util.HashMap[String, Object] = {
-    val map = new java.util.HashMap[String, Object]()
-    map.put("tcpNoDelay", true: java.lang.Boolean)
-    map.put("bufferFactory", bufferFactory)
-    map
-  }
-
   private def makePipeline(receiver: ActorRef): ChannelPipeline = Channels.pipeline(new RequestEncoder(), new ResponseFrameDecoder(), new ResponseDecoder(), new MongoHandler(receiver))
 
   private def makeChannel(receiver: ActorRef): Channel = {
     val channel = channelFactory.newChannel(makePipeline(receiver))
-    channel.getConfig.setOptions(makeOptions)
+    val config = channel.getConfig
+    config.setTcpNoDelay(options.tcpNoDelay)
+    config.setBufferFactory(bufferFactory)
+    config.setKeepAlive(options.keepAlive)
+    config.setConnectTimeoutMillis(options.connectTimeoutMS)
     channel
   }
 }

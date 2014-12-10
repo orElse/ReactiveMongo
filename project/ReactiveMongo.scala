@@ -120,7 +120,7 @@ object Resolvers {
 }
 
 object Dependencies {
-  val AkkaVersion = "2.3.6"
+  val AkkaVersion = "2.3.7"
   
   val netty = "io.netty" % "netty" % "3.8.0.Final" cross CrossVersion.Disabled
 

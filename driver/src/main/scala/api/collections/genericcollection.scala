@@ -221,7 +221,7 @@ trait GenericCollection[P <: SerializationPack with Singleton] extends Collectio
       db.connection.metadata match {
         case Some(metadata) if metadata.maxWireVersion >= MongoWireVersion.V26 =>
           import reactivemongo.api.commands._
-          runCommand(BatchCommands.InsertCommand.Insert(document)).flatMap { wr =>
+          runCommand(BatchCommands.InsertCommand.Insert(writeConcern = writeConcern)(document)).flatMap { wr =>
             val flattened = wr.flatten
             if(!flattened.ok) // was ordered, with one doc => fail if has an error
               Future.failed(flattened)

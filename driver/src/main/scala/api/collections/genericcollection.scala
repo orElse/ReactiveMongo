@@ -291,18 +291,22 @@ trait GenericCollection[P <: SerializationPack with Singleton] extends Collectio
    */
   def remove[T](query: T, writeConcern: WriteConcern = WriteConcern.Default, firstMatchOnly: Boolean = false)(implicit writer: pack.Writer[T], ec: ExecutionContext): Future[WriteResult] =
     Failover2(db.connection, failoverStrategy) { () =>
+      val limit = firstMatchOnly match {
+        case true => 1
+        case false => 0
+      }
       db.connection.metadata match {
         case Some(metadata) if metadata.maxWireVersion >= MongoWireVersion.V26 =>
           import reactivemongo.api.commands._
           import BatchCommands.DeleteCommand.{ Delete, DeleteElement }
-          runCommand(Delete(DeleteElement(query, 1))).flatMap { wr =>
+          runCommand(Delete(DeleteElement(query, limit))).flatMap { wr =>
             val flattened = wr.flatten
             if(!flattened.ok) // was ordered, with one doc => fail if has an error
               Future.failed(flattened)
             else Future.successful(wr)
           }
         case Some(_) =>
-          val op = Delete(fullCollectionName, if (firstMatchOnly) 1 else 0)
+          val op = Delete(fullCollectionName, limit)
           val bson = writeDoc(query, writer)
           val checkedWriteRequest = CheckedWriteRequest(op, BufferSequence(bson), writeConcern)
           db.connection.sendExpectingResponse(checkedWriteRequest).map(pack.readAndDeserialize(_, LastErrorReader))

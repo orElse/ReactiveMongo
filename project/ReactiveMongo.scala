@@ -15,8 +15,8 @@ object BuildSettings {
   val buildSettings = Defaults.defaultSettings ++ Seq(
     organization := "org.reactivemongo",
     version := buildVersion,
-    scalaVersion := "2.11.2",
-    crossScalaVersions  := Seq("2.11.2", "2.10.4"),
+    scalaVersion := "2.11.5",
+    crossScalaVersions  := Seq("2.11.5", "2.10.5"), // use scala version which are used by coresponding akka dependencies
     crossVersion := CrossVersion.binary,
     javaOptions in test ++= Seq("-Xmx512m", "-XX:MaxPermSize=512m"),
     scalacOptions ++= Seq("-unchecked", "-deprecation", "-target:jvm-1.6"),
@@ -120,7 +120,7 @@ object Resolvers {
 }
 
 object Dependencies {
-  val AkkaVersion = "2.3.7"
+  val AkkaVersion = "2.3.10"
   
   val netty = "io.netty" % "netty" % "3.8.0.Final" cross CrossVersion.Disabled
 
